@@ -6,6 +6,10 @@ Un script Bash interactivo para encontrar y administrar proyectos que usan `dock
 
 Facilitar la administración de proyectos docker-compose desde la terminal sin recordar comandos largos. Ideal para desarrolladores que manejan varios proyectos locales.
 
+<img width="1466" height="828" alt="image" src="https://github.com/user-attachments/assets/8a2c95ef-ada8-4ac2-9d16-e41ca5e57611" />
+
+
+
 ## Requisitos
 
 - Linux o macOS con Bash (probado en Bash 4+).
