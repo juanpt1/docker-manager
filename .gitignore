@@ -1,0 +1,58 @@
+# Instrucciones para IA
+CLAUDE.md
+AI.md
+LLM.md
+.github/copilot-instructions.md
+
+# Archivos temporales de Bash/Shell
+*.swp
+*.swo
+*~
+*.tmp
+*.bak
+*.log
+
+# Archivos de backup
+*.backup
+*.old
+*_backup
+*_old
+
+# Archivos del sistema operativo
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Directorios de IDEs y editores
+.vscode/
+.idea/
+*.sublime-*
+*.code-workspace
+.vim/
+.netrwhist
+
+# Archivos de entorno locales
+.env
+.env.local
+.env.*.local
+*.local
+
+# Archivos de testing/debug locales
+debug.log
+test-output/
+*.test
+
+# Cache y archivos temporales
+.cache/
+*.cache
+tmp/
+temp/
+
+# Archivos específicos del usuario
+user-config.sh
+local-settings.sh
