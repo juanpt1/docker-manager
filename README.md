@@ -37,6 +37,8 @@ Inicia el script desde la terminal:
 
 Al ejecutarlo, el script buscará en el directorio HOME (`~`) proyectos que contengan un `docker-compose.yml` y te pedirá seleccionar uno. Una vez seleccionado, mostrará el estado de los servicios y un menú interactivo con las siguientes acciones:
 
+### Operaciones de Proyecto Individual
+
 1) Start (docker compose start)
 2) Stop (docker compose stop)
 3) Ejecutar (docker compose up -d)
@@ -50,12 +52,34 @@ Al ejecutarlo, el script buscará en el directorio HOME (`~`) proyectos que cont
 11) Detener servicios específicos (por número o nombre)
 12) Entrar a un servicio en ejecución (intenta `bash`, sino `sh`)
 
-Además ofrece atajos:
-- `c` para cambiar de proyecto.
-- `e` para salir.
+### Funcionalidades Avanzadas
+
+13) **Ver Logs**: Visor simple de logs:
+    - Seleccionar servicio (o 0 para ver todos)
+    - Ver últimas 100 líneas
+    - Presionar 'q' para salir del visor
+    - Presionar ENTER para volver al menú
+
+14) **Port Mapping Visualization**: Tabla visual de puertos expuestos que muestra:
+    - Puerto del contenedor y puerto del host
+    - Protocolo (tcp/udp)
+    - URLs generadas automáticamente (http, postgresql, redis, etc.)
+    - Estado del servicio
+
+### Navegación y Gestión Multi-Proyecto
+
+- **m) Multi-Project Mode**: Gestionar múltiples proyectos simultáneamente:
+  - Selección interactiva con checkboxes [X] / [ ]
+  - Operaciones batch: start, stop, restart, up, down, build
+  - Ejecución secuencial con reporte de éxito/fallo
+  - Vista de estado agregado de proyectos seleccionados
+
+- **c) Cambiar de proyecto**: Volver a la selección de proyecto individual
+- **e) Salir**: Cerrar el script
 
 ## Ejemplos rápidos
 
+### Proyecto Individual
 - Levantar todos los servicios (si no existen, ejecuta `docker compose up -d`):
   - Selecciona la opción 3.
 
