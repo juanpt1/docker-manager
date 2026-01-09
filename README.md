@@ -1,4 +1,4 @@
-# Docker compose manager (gestor de proyectos docker-compose)
+# Docker compose manager
 
 Un script Bash interactivo para encontrar y administrar proyectos que usan `docker-compose.yml` dentro del directorio HOME. Proporciona un menú de operaciones comunes (start/stop/up/down/restart/build/enter) con salida coloreada, monitoreo de recursos y utilidades de inspección.
 
