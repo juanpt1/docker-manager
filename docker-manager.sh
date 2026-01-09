@@ -1,10 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# =============================
-# Gestor de proyectos docker-compose
-# =============================
-
 # --- Colores ---
 greenColor=$'\e[1;32m'
 redColor=$'\e[1;31m'
@@ -216,54 +212,6 @@ generate_service_url() {
   local PORT="$2"
   local PROTOCOL="${3:-tcp}"
 
-  # Pattern matching para servicios comunes
-  case "$SERVICE" in
-    nginx|apache|httpd|web|frontend|ui|app)
-      if [ "$PORT" = "443" ] || [ "$PORT" = "8443" ]; then
-        echo "https://localhost:$PORT"
-      else
-        echo "http://localhost:$PORT"
-      fi
-      ;;
-    postgres|postgresql|db|database)
-      echo "postgresql://localhost:$PORT"
-      ;;
-    mysql|mariadb)
-      echo "mysql://localhost:$PORT"
-      ;;
-    redis|redis-*)
-      echo "redis://localhost:$PORT"
-      ;;
-    mongodb|mongo|mongo-*)
-      echo "mongodb://localhost:$PORT"
-      ;;
-    *)
-      # Revisar puertos comunes
-      case "$PORT" in
-        80|8080|8000|3000|4200|5000|9000)
-          echo "http://localhost:$PORT"
-          ;;
-        443|8443)
-          echo "https://localhost:$PORT"
-          ;;
-        5432)
-          echo "postgresql://localhost:$PORT"
-          ;;
-        3306)
-          echo "mysql://localhost:$PORT"
-          ;;
-        6379)
-          echo "redis://localhost:$PORT"
-          ;;
-        27017)
-          echo "mongodb://localhost:$PORT"
-          ;;
-        *)
-          echo "tcp://localhost:$PORT"
-          ;;
-      esac
-      ;;
-  esac
 }
 
 # --- Mostrar mapeo de puertos ---
@@ -276,8 +224,11 @@ show_port_mappings() {
   echo -e "${greenColor}        Mapeo de puertos${endColor}"
   echo -e "${greenColor}═══════════════════════════════════════${endColor}\n"
 
-  local OUTPUT="SERVICE\tCONTAINER_PORT\tHOST_PORT\tPROTOCOL\tURL\n"
+  local OUTPUT="SERVICE\tCONTAINER_PORT\tHOST_PORT\tPROTOCOL\t\n"
   local HAS_PORTS=false
+
+  # Array asociativo para rastrear puertos ya mostrados (evita duplicados)
+  declare -A SEEN_PORTS
 
   # Obtener servicios con puertos
   while IFS=$'\t' read -r SERVICE PORTS STATUS; do
@@ -298,7 +249,7 @@ show_port_mappings() {
 
     HAS_PORTS=true
 
-    # Parsear mapeo de puertos: "0.0.0.0:8080->80/tcp, :::8443->443/tcp"
+    # Parsear mapeo de puertos: "0.0.0.0:8080->80/tcp, :::8080->80/tcp"
     # Separar por coma si hay múltiples puertos
     IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
 
@@ -311,6 +262,17 @@ show_port_mappings() {
         local HOST_PORT="${BASH_REMATCH[1]}"
         local CONTAINER_PORT="${BASH_REMATCH[2]}"
         local PROTOCOL="${BASH_REMATCH[3]}"
+
+        # Crear clave única para evitar duplicados
+        local PORT_KEY="${SERVICE}:${CONTAINER_PORT}:${HOST_PORT}:${PROTOCOL}"
+
+        # Si ya vimos este puerto, saltar (usar :-  para evitar error con set -u)
+        if [ -n "${SEEN_PORTS[$PORT_KEY]:-}" ]; then
+          continue
+        fi
+
+        # Marcar como visto
+        SEEN_PORTS[$PORT_KEY]=1
 
         # Generar URL
         local URL=$(generate_service_url "$SERVICE" "$HOST_PORT" "$PROTOCOL")
@@ -376,6 +338,254 @@ quick_tail_logs() {
   fi
 
   read -rp "🔙 Presiona ENTER para continuar..." dummy
+}
+
+# =============================
+# FUNCIONES DE MONITOREO DE RECURSOS
+# =============================
+
+# --- Extraer número decimal de porcentaje ---
+extract_percent_value() {
+  local VALUE="$1"
+  # Quitar % y espacios, mantener decimales
+  echo "$VALUE" | tr -d '%' | tr -d ' ' | grep -oE '[0-9]+\.?[0-9]*' | head -1
+}
+
+# --- Función para colorear según umbral (soporta decimales) ---
+colorize_percent() {
+  local VALUE="$1"
+  local LOW_THRESHOLD="${2:-50}"
+  local HIGH_THRESHOLD="${3:-80}"
+
+  local NUM=$(extract_percent_value "$VALUE")
+
+  if [ -z "$NUM" ]; then
+    echo "$VALUE"
+    return
+  fi
+
+  # Comparar usando awk para soportar decimales
+  local COLOR=$(awk -v num="$NUM" -v low="$LOW_THRESHOLD" -v high="$HIGH_THRESHOLD" 'BEGIN {
+    if (num < low) print "green"
+    else if (num < high) print "yellow"
+    else print "red"
+  }')
+
+  case "$COLOR" in
+    green)  echo -e "${greenColor}${VALUE}${endColor}" ;;
+    yellow) echo -e "${yellowColor}${VALUE}${endColor}" ;;
+    red)    echo -e "${redColor}${VALUE}${endColor}" ;;
+    *)      echo "$VALUE" ;;
+  esac
+}
+
+# --- Generar barra de progreso visual (soporta decimales) ---
+generate_bar() {
+  local PERCENT="$1"
+  local WIDTH="${2:-25}"
+
+  local NUM=$(extract_percent_value "$PERCENT")
+
+  if [ -z "$NUM" ]; then
+    NUM=0
+  fi
+
+  # Calcular llenado usando awk para decimales
+  local FILLED=$(awk -v num="$NUM" -v width="$WIDTH" 'BEGIN { printf "%d", (num * width / 100) }')
+
+  # Si hay uso pero FILLED es 0, mostrar al menos 1 carácter
+  local HAS_VALUE=$(awk -v num="$NUM" 'BEGIN { if (num > 0) print "yes"; else print "no" }')
+  if [ "$HAS_VALUE" = "yes" ] && [ "$FILLED" -eq 0 ]; then
+    FILLED=1
+  fi
+
+  local EMPTY=$((WIDTH - FILLED))
+
+  # Asegurar valores válidos
+  if [ "$FILLED" -lt 0 ]; then FILLED=0; fi
+  if [ "$EMPTY" -lt 0 ]; then EMPTY=0; fi
+
+  # Determinar color según umbral
+  local BAR_COLOR=$(awk -v num="$NUM" 'BEGIN {
+    if (num < 50) print "green"
+    else if (num < 80) print "yellow"
+    else print "red"
+  }')
+
+  # Construir barra con color
+  local BAR=""
+  case "$BAR_COLOR" in
+    green)  BAR="${greenColor}" ;;
+    yellow) BAR="${yellowColor}" ;;
+    red)    BAR="${redColor}" ;;
+  esac
+
+  # Agregar caracteres llenos
+  for ((i=0; i<FILLED; i++)); do BAR+="█"; done
+  BAR+="${endColor}"
+
+  # Agregar caracteres vacíos (con color gris/tenue)
+  for ((i=0; i<EMPTY; i++)); do BAR+="░"; done
+
+  echo -e "$BAR"
+}
+
+# --- Renderizar métricas (función interna) ---
+render_metrics() {
+  local SHOW_HEADER="${1:-true}"
+
+  # Variables para resumen
+  local TOTAL_CPU="0"
+  local TOTAL_MEM="0"
+  local SERVICE_COUNT=0
+  local CRITICAL_SERVICES=""
+
+  if [ "$SHOW_HEADER" = "true" ]; then
+    echo -e "${purpleColor}╔══════════════════════════════════════════════════════════════════════════════╗${endColor}"
+    echo -e "${purpleColor}║${endColor}                    ${greenColor}📊 MÉTRICAS DE RECURSOS${endColor}                                  ${purpleColor}║${endColor}"
+    echo -e "${purpleColor}╚══════════════════════════════════════════════════════════════════════════════╝${endColor}\n"
+    echo -e "${turquoiseColor}Leyenda:${endColor} ${greenColor}█${endColor} Normal (<50%)  ${yellowColor}█${endColor} Advertencia (50-80%)  ${redColor}█${endColor} Crítico (>80%)\n"
+  fi
+
+  # Obtener stats en formato parseable
+  while IFS= read -r LINE; do
+    # Saltar header
+    if [[ "$LINE" == *"NAME"* ]] || [[ "$LINE" == *"CONTAINER"* ]]; then
+      continue
+    fi
+
+    # Parsear línea
+    local NAME=$(echo "$LINE" | awk '{print $1}')
+    local CPU=$(echo "$LINE" | awk '{print $2}')
+    local MEM_USAGE=$(echo "$LINE" | awk '{print $3}')
+    local MEM_LIMIT=$(echo "$LINE" | awk '{print $5}')
+    local MEM_PERCENT=$(echo "$LINE" | awk '{print $6}')
+    local NET_IO=$(echo "$LINE" | awk '{print $7" "$8" "$9}')
+    local BLOCK_IO=$(echo "$LINE" | awk '{print $10" "$11" "$12}')
+
+    if [ -z "$NAME" ]; then
+      continue
+    fi
+
+    SERVICE_COUNT=$((SERVICE_COUNT + 1))
+
+    # Extraer valores numéricos con decimales
+    local CPU_NUM=$(extract_percent_value "$CPU")
+    local MEM_NUM=$(extract_percent_value "$MEM_PERCENT")
+
+    # Acumular con decimales usando awk
+    if [ -n "$CPU_NUM" ]; then
+      TOTAL_CPU=$(awk -v total="$TOTAL_CPU" -v val="$CPU_NUM" 'BEGIN { printf "%.2f", total + val }')
+    fi
+    if [ -n "$MEM_NUM" ]; then
+      TOTAL_MEM=$(awk -v total="$TOTAL_MEM" -v val="$MEM_NUM" 'BEGIN { printf "%.2f", total + val }')
+    fi
+
+    # Detectar servicios críticos
+    local IS_CRITICAL=$(awk -v cpu="${CPU_NUM:-0}" -v mem="${MEM_NUM:-0}" 'BEGIN {
+      if (cpu >= 80 || mem >= 85) print "yes"
+      else print "no"
+    }')
+    if [ "$IS_CRITICAL" = "yes" ]; then
+      CRITICAL_SERVICES="${CRITICAL_SERVICES}${NAME} "
+    fi
+
+    # Mostrar servicio
+    echo -e "${blueColor}┌──────────────────────────────────────────────────────────────────────────────┐${endColor}"
+    echo -e "${blueColor}│${endColor} ${turquoiseColor}📦 ${NAME}${endColor}"
+    echo -e "${blueColor}├──────────────────────────────────────────────────────────────────────────────┤${endColor}"
+
+    # CPU
+    local CPU_BAR=$(generate_bar "$CPU" 25)
+    local CPU_COLORED=$(colorize_percent "$CPU" 50 80)
+    echo -e "${blueColor}│${endColor}  ${yellowColor}CPU:${endColor}    $CPU_BAR $CPU_COLORED"
+
+    # Memoria
+    local MEM_BAR=$(generate_bar "$MEM_PERCENT" 25)
+    local MEM_COLORED=$(colorize_percent "$MEM_PERCENT" 60 85)
+    echo -e "${blueColor}│${endColor}  ${yellowColor}RAM:${endColor}    $MEM_BAR $MEM_COLORED ${purpleColor}($MEM_USAGE / $MEM_LIMIT)${endColor}"
+
+    # Red I/O
+    echo -e "${blueColor}│${endColor}  ${yellowColor}NET:${endColor}    ${greenColor}↓${endColor} $(echo $NET_IO | awk '{print $1}') ${redColor}↑${endColor} $(echo $NET_IO | awk '{print $3}')"
+
+    # Block I/O
+    echo -e "${blueColor}│${endColor}  ${yellowColor}DISK:${endColor}   ${greenColor}R${endColor} $(echo $BLOCK_IO | awk '{print $1}') ${redColor}W${endColor} $(echo $BLOCK_IO | awk '{print $3}')"
+
+    echo -e "${blueColor}└──────────────────────────────────────────────────────────────────────────────┘${endColor}"
+
+  done < <(docker compose stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}" 2>/dev/null)
+
+  # Resumen
+  if [ "$SERVICE_COUNT" -gt 0 ]; then
+    local AVG_CPU=$(awk -v total="$TOTAL_CPU" -v count="$SERVICE_COUNT" 'BEGIN { printf "%.2f", total / count }')
+    local AVG_MEM=$(awk -v total="$TOTAL_MEM" -v count="$SERVICE_COUNT" 'BEGIN { printf "%.2f", total / count }')
+
+    echo -e "\n${purpleColor}╔══════════════════════════════════════════════════════════════════════════════╗${endColor}"
+    echo -e "${purpleColor}║${endColor}                         ${greenColor}📈 RESUMEN GENERAL${endColor}                                  ${purpleColor}║${endColor}"
+    echo -e "${purpleColor}╠══════════════════════════════════════════════════════════════════════════════╣${endColor}"
+    echo -e "${purpleColor}║${endColor}  Servicios monitoreados: ${turquoiseColor}$SERVICE_COUNT${endColor}"
+    echo -e "${purpleColor}║${endColor}  CPU promedio:           $(colorize_percent "${AVG_CPU}%" 50 80)"
+    echo -e "${purpleColor}║${endColor}  RAM promedio:           $(colorize_percent "${AVG_MEM}%" 60 85)"
+    echo -e "${purpleColor}║${endColor}  CPU total acumulado:    ${turquoiseColor}${TOTAL_CPU}%${endColor}"
+    echo -e "${purpleColor}║${endColor}  RAM total acumulado:    ${turquoiseColor}${TOTAL_MEM}%${endColor}"
+
+    if [ -n "$CRITICAL_SERVICES" ]; then
+      echo -e "${purpleColor}║${endColor}"
+      echo -e "${purpleColor}║${endColor}  ${redColor}⚠ SERVICIOS CRÍTICOS:${endColor} ${yellowColor}$CRITICAL_SERVICES${endColor}"
+    else
+      echo -e "${purpleColor}║${endColor}"
+      echo -e "${purpleColor}║${endColor}  ${greenColor}✓ Todos los servicios dentro de parámetros normales${endColor}"
+    fi
+
+    echo -e "${purpleColor}╚══════════════════════════════════════════════════════════════════════════════╝${endColor}"
+  fi
+}
+
+# --- Mostrar métricas de recursos por servicio ---
+show_resource_metrics() {
+  if ! require_built; then
+    return 1
+  fi
+
+  # Obtener servicios en ejecución
+  mapfile -t RUNNING_SERVICES < <(docker compose ps --services --status running 2>/dev/null)
+
+  if [ ${#RUNNING_SERVICES[@]} -eq 0 ]; then
+    echo -e "${yellowColor}⚠ No hay servicios en ejecución para monitorear.${endColor}\n"
+    return 1
+  fi
+
+  # Preguntar modo
+  echo -e "\n${greenColor}Selecciona el modo de visualización:${endColor}\n"
+  echo -e "${blueColor}1${endColor}) Snapshot (captura única)"
+  echo -e "${blueColor}2${endColor}) Tiempo real (actualización cada 2s, Ctrl+C para salir)"
+  echo ""
+  read -rp "${yellowColor}👉 Elige una opción [1]: ${endColor}" MODE_CHOICE
+
+  case "$MODE_CHOICE" in
+    2)
+      # Modo tiempo real
+      echo -e "\n${yellowColor}Iniciando monitoreo en tiempo real... (Ctrl+C para salir)${endColor}\n"
+      sleep 1
+
+      # Capturar Ctrl+C para salir limpiamente
+      trap 'echo -e "\n${greenColor}Monitoreo finalizado.${endColor}"; return 0' INT
+
+      while true; do
+        clear
+        echo -e "\n${redColor}[TIEMPO REAL]${endColor} $(date '+%Y-%m-%d %H:%M:%S') - ${yellowColor}Ctrl+C para salir${endColor}\n"
+        render_metrics true
+        sleep 2
+      done
+
+      trap - INT
+      ;;
+    *)
+      # Modo snapshot (por defecto)
+      echo ""
+      render_metrics true
+      ;;
+  esac
 }
 
 # =============================
@@ -674,31 +884,93 @@ multiproject_menu() {
 # PROGRAMA PRINCIPAL
 # =============================
 
-select_project
+# --- Buscar proyectos al inicio ---
+discover_projects() {
+  echo "🔍 Buscando proyectos con docker-compose.yml en el home..."
+  mapfile -t PROJECTS < <(find ~ -name "docker-compose.yml" -exec dirname {} \; 2>/dev/null)
 
-# --- Menú de acciones ---
-while true; do
+  if [ ${#PROJECTS[@]} -eq 0 ]; then
+    echo -e "${redColor}❌ No se encontraron proyectos con docker-compose.yml${endColor}"
+    exit 1
+  fi
+
+  echo -e "${greenColor}✓ Se encontraron ${#PROJECTS[@]} proyecto(s)${endColor}\n"
+}
+
+# --- Obtener nombre del proyecto (solo el nombre del directorio) ---
+get_project_name() {
+  local PROJECT_PATH="$1"
+  basename "$PROJECT_PATH"
+}
+
+# --- Menú principal inicial ---
+show_main_menu() {
+  clear
+  echo -e "${purpleColor}════════════════════════════════════════════${endColor}"
+  echo -e "${purpleColor}        🐳 DOCKER COMPOSE MANAGER 🐳        ${endColor}"
+  echo -e "${purpleColor}════════════════════════════════════════════${endColor}\n"
+
+  echo -e "${greenColor}📂 Proyectos encontrados: ${blueColor}${#PROJECTS[@]}${endColor}\n"
+
+  # Mostrar lista de proyectos con solo el nombre
+  for i in "${!PROJECTS[@]}"; do
+    local PROJECT_NAME=$(get_project_name "${PROJECTS[$i]}")
+    echo -e "   ${blueColor}$((i+1))${endColor}. ${turquoiseColor}${PROJECT_NAME}${endColor}"
+  done
+
+  echo -e "\n${turquoiseColor}=== Modo de Operación ===${endColor}"
+  echo -e "${blueColor}1${endColor}) Gestionar Proyecto Individual ${purpleColor}(seleccionar un proyecto específico)${endColor}"
+  echo -e "${blueColor}2${endColor}) Modo Multi-Proyecto ${purpleColor}(gestionar múltiples proyectos)${endColor}"
+
+  echo -e "\n${turquoiseColor}=== Información ===${endColor}"
+  echo -e "${blueColor}l${endColor}) Listar proyectos con rutas completas"
+  echo -e "${redColor}e${endColor}) Salir\n"
+
+  read -rp "${yellowColor}👉 Elige una opción: ${endColor}" MAIN_CHOICE
+}
+
+# --- Listar proyectos disponibles con rutas completas ---
+list_projects() {
+  clear
+  echo -e "${greenColor}📂 Proyectos con docker-compose.yml encontrados:${endColor}\n"
+  for i in "${!PROJECTS[@]}"; do
+    local PROJECT_NAME=$(get_project_name "${PROJECTS[$i]}")
+    echo -e "${blueColor}$((i+1))${endColor}) ${turquoiseColor}${PROJECT_NAME}${endColor}"
+    echo -e "    ${purpleColor}${PROJECTS[$i]}${endColor}"
+  done
+  echo ""
+  read -rp "🔙 Presiona ENTER para continuar..." dummy
+}
+
+# =============================
+# MENÚ DE PROYECTO INDIVIDUAL
+# =============================
+
+project_menu() {
+  # --- Menú de acciones ---
+  while true; do
   echo -e "\nProyecto:${blueColor} $DIR ${endColor}"
   check_status
   echo -e "\n${greenColor}⚡ Acciones disponibles:${endColor}\n"
 
   echo -e "${blueColor} 1${endColor}) Start ${purpleColor}(docker compose start)${endColor}"
-  echo -e "${blueColor} 2${endColor}) Stop ${purpleColor}(docker compose stop)${endColor}"
-  echo -e "${blueColor} 3${endColor}) Ejecutar ${purpleColor}(docker compose up -d)${endColor}"
-  echo -e "${blueColor} 4${endColor}) Detener ${purpleColor}(docker compose down)${endColor}"
-  echo -e "${blueColor} 5${endColor}) Detener y limpiar todo ${purpleColor}(docker compose down --rmi all --volumes --remove-orphans)${endColor}"
-  echo -e "${blueColor} 6${endColor}) Reiniciar ${purpleColor}(docker compose restart)${endColor}"
-  echo -e "${blueColor} 7${endColor}) Construir ${purpleColor}(docker compose up -d --build)${endColor}"
-  echo -e "${blueColor} 8${endColor}) Ver estadísticas de docker ${purpleColor}(docker compose stats)${endColor}"
-  echo -e "${blueColor} 9${endColor}) Inspeccionar contenido del docker-compose.yml"
-  echo -e "${blueColor}10${endColor}) Reiniciar un servicio específico ${purpleColor}(docker compose restart <servicio>)${endColor}"
-  echo -e "${blueColor}11${endColor}) Detener un servicio específico ${purpleColor}(docker compose stop <servicio>)${endColor}"
-  echo -e "${blueColor}12${endColor}) Entrar a un servicio ${purpleColor}(docker exec -it <servicio> /bin/sh | /bin/bash)${endColor}"
-  echo -e "${blueColor}13${endColor}) Ver logs ${purpleColor}(ultimas 100 lineas)${endColor}"
-  echo -e "${blueColor}14${endColor}) Ver puertos ${purpleColor}(visualización de puertos con URL)${endColor}"
+  echo -e "${blueColor} 2${endColor}) Ejecutar ${purpleColor}(docker compose up -d)${endColor}"
+  echo -e "${blueColor} 3${endColor}) Construir ${purpleColor}(docker compose up -d --build)${endColor}"
+  echo -e "${blueColor} 4${endColor}) Stop ${purpleColor}(docker compose stop)${endColor}"
+  echo -e "${blueColor} 5${endColor}) Detener ${purpleColor}(docker compose down)${endColor}"
+  echo -e "${blueColor} 6${endColor}) Limpiar todo ${purpleColor}(docker compose down --rmi all --volumes --remove-orphans)${endColor}"
+  echo -e "${blueColor} 7${endColor}) Reiniciar ${purpleColor}(docker compose restart)${endColor}"
+  echo -e "${blueColor} 8${endColor}) Reiniciar servicio ${purpleColor}(docker compose restart <servicio>)${endColor}"
+  echo -e "${blueColor} 9${endColor}) Detener servicio ${purpleColor}(docker compose stop <servicio>)${endColor}"
+  echo -e "${blueColor}10${endColor}) Entrar a servicio ${purpleColor}(docker exec -it <servicio> bash/sh)${endColor}"
+  echo -e "${blueColor}11${endColor}) Build + Start servicio ${purpleColor}(docker compose up -d --build <servicio>)${endColor}"
+  echo -e "${blueColor}12${endColor}) Down servicio ${purpleColor}(docker compose down <servicio>)${endColor}"
+  echo -e "${blueColor}13${endColor}) Ver logs ${purpleColor}(últimas 100 líneas)${endColor}"
+  echo -e "${blueColor}14${endColor}) Ver puertos ${purpleColor}(visualización con URLs)${endColor}"
+  echo -e "${blueColor}15${endColor}) Métricas ${purpleColor}(docker compose stats)${endColor}"
+  echo -e "${blueColor}16${endColor}) Ver docker-compose.yml"
 
-  echo -e "\n${turquoiseColor}=== Navegación ===${endColor}"
-  echo -e "${blueColor}m${endColor}) Multi-Project ${purpleColor}(gestionar múltiples proyectos)${endColor}"
+  echo -e "\n${blueColor}m${endColor}) Multi-Project ${purpleColor}(gestionar múltiples proyectos)${endColor}"
   echo -e "${blueColor}c${endColor}) Cambiar de proyecto"
   echo -e "${redColor}e${endColor}) Salir\n"
 
@@ -715,14 +987,6 @@ while true; do
       fi
       ;;
     2)
-      echo "🛠️ Deteniendo servicios sin eliminarlos..."
-      if require_built && docker compose stop; then
-        echo "✅ Servicios detenidos correctamente."
-      else
-        echo "❌ Error al detener servicios."
-      fi
-      ;;
-    3)
       echo "🛠️ Verificando si ya están levantados..."
       RUNNING=$(docker compose ps --status running --services 2>/dev/null)
       CREATED=$(docker compose ps --all --services 2>/dev/null)
@@ -746,7 +1010,24 @@ while true; do
       fi
       docker compose ps
       ;;
+    3)
+      echo "🛠️ Reconstruyendo y levantando servicios..."
+      if docker compose up -d --build; then
+        echo "✅ Servicios reconstruidos y levantados."
+      else
+        echo "❌ Error al reconstruir servicios."
+      fi
+      docker compose ps
+      ;;
     4)
+      echo "🛠️ Deteniendo servicios sin eliminarlos..."
+      if require_built && docker compose stop; then
+        echo "✅ Servicios detenidos correctamente."
+      else
+        echo "❌ Error al detener servicios."
+      fi
+      ;;
+    5)
       echo "🛠️ Deteniendo servicios..."
       if docker compose down; then
         echo "✅ Servicios detenidos correctamente."
@@ -754,7 +1035,7 @@ while true; do
         echo "❌ Error al detener servicios."
       fi
       ;;
-    5)
+    6)
       echo "⚠️ Esta acción eliminará contenedores, volúmenes, imágenes y redes."
       read -rp "¿Estás seguro? (y/N): " CONFIRM
       if [[ "$CONFIRM" =~ ^[yY]$ ]]; then
@@ -768,7 +1049,7 @@ while true; do
         echo "❌ Operación cancelada."
       fi
       ;;
-    6)
+    7)
       echo "🛠️ Reiniciando servicios..."
       if require_built && docker compose restart; then
         echo "✅ Servicios reiniciados correctamente."
@@ -777,23 +1058,7 @@ while true; do
       fi
       docker compose ps
       ;;
-    7)
-      echo "🛠️ Reconstruyendo y levantando servicios..."
-      if docker compose up -d --build; then
-        echo "✅ Servicios reconstruidos y levantados."
-      else
-        echo "❌ Error al reconstruir servicios."
-      fi
-      docker compose ps
-      ;;
     8)
-      docker compose stats --no-stream
-      ;;
-    9)
-      echo -e "\n🛠️ Inspeccionando docker-compose.yml en $DIR:\n"
-      less docker-compose.yml
-      ;;
-    10)
       SELECTED_SERVICES=$(select_services "Selecciona uno o varios servicios a reiniciar" true)
       if [ $? -eq 0 ] && [ -n "$SELECTED_SERVICES" ]; then
         for SERVICE in $SELECTED_SERVICES; do
@@ -807,7 +1072,7 @@ while true; do
       fi
       read -rp "🔙 Presiona ENTER para continuar..." dummy
       ;;
-    11)
+    9)
       SELECTED_SERVICES=$(select_services "Selecciona uno o varios servicios a detener" true)
       if [ $? -eq 0 ] && [ -n "$SELECTED_SERVICES" ]; then
         for SERVICE in $SELECTED_SERVICES; do
@@ -821,7 +1086,7 @@ while true; do
       fi
       read -rp "🔙 Presiona ENTER para continuar..." dummy
       ;;
-    12)
+    10)
       if require_built; then
         echo -e "\n${greenColor}Selecciona un servicio para entrar:${endColor}\n"
         mapfile -t SERVICES < <(docker compose ps --services --status running 2>/dev/null)
@@ -848,6 +1113,34 @@ while true; do
         fi
       fi
       ;;
+    11)
+      SELECTED_SERVICES=$(select_services "Selecciona uno o varios servicios a buildear" true)
+      if [ $? -eq 0 ] && [ -n "$SELECTED_SERVICES" ]; then
+        for SERVICE in $SELECTED_SERVICES; do
+          echo "🔨 Buildeando servicio: ${blueColor}$SERVICE${endColor}"
+          if docker compose up -d --build "$SERVICE"; then
+            echo "✅ Servicio $SERVICE buildeado correctamente."
+          else
+            echo "❌ Error al buildear servicio $SERVICE."
+          fi
+        done
+      fi
+      read -rp "🔙 Presiona ENTER para continuar..." dummy
+      ;;
+    12)
+      SELECTED_SERVICES=$(select_services "Selecciona uno o varios servicios a detener" true)
+      if [ $? -eq 0 ] && [ -n "$SELECTED_SERVICES" ]; then
+        for SERVICE in $SELECTED_SERVICES; do
+          echo "🛑 Deteniendo servicio: ${blueColor}$SERVICE${endColor}"
+          if docker compose down "$SERVICE"; then
+            echo "✅ Servicio $SERVICE detenido correctamente."
+          else
+            echo "❌ Error al detener servicio $SERVICE."
+          fi
+        done
+      fi
+      read -rp "🔙 Presiona ENTER para continuar..." dummy
+      ;;
     13)
       quick_tail_logs
       ;;
@@ -855,12 +1148,22 @@ while true; do
       show_port_mappings
       read -rp "🔙 Presiona ENTER para continuar..." dummy
       ;;
+    15)
+      show_resource_metrics
+      read -rp "🔙 Presiona ENTER para continuar..." dummy
+      ;;
+    16)
+      echo -e "\n🛠️ Inspeccionando docker-compose.yml en $DIR:\n"
+      less docker-compose.yml
+      ;;
     m)
       MULTI_PROJECT_MODE=true
       multiproject_menu
+      MULTI_PROJECT_MODE=false
       ;;
     c)
-      select_project
+      # Cambiar de proyecto - volver al menú principal
+      return 0
       ;;
     e)
       echo "👋 Saliendo..."
@@ -868,6 +1171,41 @@ while true; do
       ;;
     *)
       echo "Opción inválida."
+      ;;
+  esac
+  done
+}
+
+# Descubrir proyectos al inicio
+discover_projects
+
+# --- Loop principal del programa ---
+while true; do
+  show_main_menu
+
+  case "$MAIN_CHOICE" in
+    1)
+      # Modo proyecto individual
+      select_project
+      # Menú de acciones del proyecto individual
+      project_menu
+      ;;
+    2)
+      # Modo multi-proyecto
+      MULTI_PROJECT_MODE=true
+      multiproject_menu
+      MULTI_PROJECT_MODE=false
+      ;;
+    l|L)
+      list_projects
+      ;;
+    e|E)
+      echo "👋 Saliendo..."
+      exit 0
+      ;;
+    *)
+      echo -e "${redColor}Opción inválida.${endColor}"
+      sleep 1
       ;;
   esac
 done
