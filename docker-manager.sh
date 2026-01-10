@@ -340,6 +340,375 @@ quick_tail_logs() {
   read -rp "🔙 Presiona ENTER para continuar..." dummy
 }
 
+# --- Exportar logs a archivo ---
+export_logs() {
+  if ! require_built; then
+    return 1
+  fi
+
+  mapfile -t SERVICES < <(docker compose config --services 2>/dev/null)
+
+  if [ ${#SERVICES[@]} -eq 0 ]; then
+    echo -e "${redColor}❌ No se encontraron servicios definidos.${endColor}"
+    read -rp "🔙 Presiona ENTER para continuar..." dummy
+    return 1
+  fi
+
+  echo -e "\n${greenColor}Exportar logs a archivo${endColor}\n"
+  echo -e "${blueColor}0${endColor}) Exportar logs de TODOS los servicios"
+
+  for i in "${!SERVICES[@]}"; do
+    echo -e "${blueColor}$((i+1))${endColor}) ${SERVICES[$i]}"
+  done
+  echo ""
+
+  read -rp "${yellowColor}👉 Selecciona un servicio (0 para todos): ${endColor}" CHOICE
+
+  # Generar timestamp para el nombre del archivo
+  local TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+  local PROJECT_NAME=$(basename "$PWD")
+  local LOG_FILE=""
+  local SERVICE_NAME=""
+
+  if [ "$CHOICE" = "0" ]; then
+    SERVICE_NAME="all"
+    LOG_FILE="${PROJECT_NAME}_${SERVICE_NAME}_${TIMESTAMP}.log"
+    echo -e "\n${yellowColor}Exportando logs de TODOS los servicios...${endColor}"
+
+    if docker compose logs --no-color > "$LOG_FILE" 2>&1; then
+      local FILE_SIZE=$(du -h "$LOG_FILE" | cut -f1)
+      local LINE_COUNT=$(wc -l < "$LOG_FILE")
+      echo -e "${greenColor}✅ Logs exportados correctamente${endColor}"
+      echo -e "   ${turquoiseColor}Archivo:${endColor} ${blueColor}$LOG_FILE${endColor}"
+      echo -e "   ${turquoiseColor}Tamaño:${endColor} $FILE_SIZE"
+      echo -e "   ${turquoiseColor}Líneas:${endColor} $LINE_COUNT"
+      echo -e "   ${turquoiseColor}Ruta:${endColor} ${purpleColor}$(pwd)/$LOG_FILE${endColor}"
+    else
+      echo -e "${redColor}❌ Error al exportar logs.${endColor}"
+    fi
+  elif [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -ge 1 ] && [ "$CHOICE" -le ${#SERVICES[@]} ]; then
+    SERVICE_NAME="${SERVICES[$((CHOICE-1))]}"
+    LOG_FILE="${PROJECT_NAME}_${SERVICE_NAME}_${TIMESTAMP}.log"
+    echo -e "\n${yellowColor}Exportando logs de: ${blueColor}$SERVICE_NAME${endColor}${yellowColor}...${endColor}"
+
+    if docker compose logs --no-color "$SERVICE_NAME" > "$LOG_FILE" 2>&1; then
+      local FILE_SIZE=$(du -h "$LOG_FILE" | cut -f1)
+      local LINE_COUNT=$(wc -l < "$LOG_FILE")
+      echo -e "${greenColor}✅ Logs exportados correctamente${endColor}"
+      echo -e "   ${turquoiseColor}Archivo:${endColor} ${blueColor}$LOG_FILE${endColor}"
+      echo -e "   ${turquoiseColor}Tamaño:${endColor} $FILE_SIZE"
+      echo -e "   ${turquoiseColor}Líneas:${endColor} $LINE_COUNT"
+      echo -e "   ${turquoiseColor}Ruta:${endColor} ${purpleColor}$(pwd)/$LOG_FILE${endColor}"
+    else
+      echo -e "${redColor}❌ Error al exportar logs de $SERVICE_NAME.${endColor}"
+    fi
+  else
+    echo -e "${redColor}❌ Opción inválida.${endColor}"
+  fi
+
+  read -rp "🔙 Presiona ENTER para continuar..." dummy
+}
+
+# =============================
+# FUNCIONES DE SEGURIDAD (TRIVY)
+# =============================
+
+# --- Verificar si Trivy está instalado ---
+check_trivy_installed() {
+  if ! command -v trivy &>/dev/null; then
+    echo -e "${redColor}╔══════════════════════════════════════════════════════════════════════════════╗${endColor}"
+    echo -e "${redColor}║${endColor}                    ${yellowColor}⚠ TRIVY NO ESTÁ INSTALADO${endColor}                              ${redColor}║${endColor}"
+    echo -e "${redColor}╚══════════════════════════════════════════════════════════════════════════════╝${endColor}\n"
+    echo -e "${turquoiseColor}Trivy es un escáner de vulnerabilidades para contenedores e imágenes Docker.${endColor}\n"
+    echo -e "${greenColor}📦 Opciones de instalación:${endColor}\n"
+    echo -e "${blueColor}Ubuntu/Debian:${endColor}"
+    echo -e "  sudo apt-get install wget apt-transport-https gnupg lsb-release"
+    echo -e "  wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -"
+    echo -e "  echo deb https://aquasecurity.github.io/trivy-repo/deb \$(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list"
+    echo -e "  sudo apt-get update && sudo apt-get install trivy\n"
+    echo -e "${blueColor}Fedora/RHEL:${endColor}"
+    echo -e "  sudo dnf install trivy\n"
+    echo -e "${blueColor}Arch Linux:${endColor}"
+    echo -e "  sudo pacman -S trivy\n"
+    echo -e "${blueColor}macOS (Homebrew):${endColor}"
+    echo -e "  brew install trivy\n"
+    echo -e "${blueColor}Instalación manual:${endColor}"
+    echo -e "  curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin\n"
+    echo -e "${purpleColor}Más información: https://aquasecurity.github.io/trivy${endColor}\n"
+    return 1
+  fi
+  return 0
+}
+
+# --- Colorear severidad de vulnerabilidades ---
+colorize_severity() {
+  local SEVERITY="$1"
+  case "$SEVERITY" in
+    CRITICAL) echo -e "${redColor}CRITICAL${endColor}" ;;
+    HIGH)     echo -e "${redColor}HIGH${endColor}" ;;
+    MEDIUM)   echo -e "${yellowColor}MEDIUM${endColor}" ;;
+    LOW)      echo -e "${greenColor}LOW${endColor}" ;;
+    UNKNOWN)  echo -e "${purpleColor}UNKNOWN${endColor}" ;;
+    *)        echo "$SEVERITY" ;;
+  esac
+}
+
+# --- Escanear imágenes Docker con Trivy ---
+scan_images_trivy() {
+  if ! require_built; then
+    return 1
+  fi
+
+  if ! check_trivy_installed; then
+    read -rp "🔙 Presiona ENTER para continuar..." dummy
+    return 1
+  fi
+
+  echo -e "\n${purpleColor}╔══════════════════════════════════════════════════════════════════════════════╗${endColor}"
+  echo -e "${purpleColor}║${endColor}                    ${greenColor}🔒 ESCÁNER DE SEGURIDAD TRIVY${endColor}                           ${purpleColor}║${endColor}"
+  echo -e "${purpleColor}╚══════════════════════════════════════════════════════════════════════════════╝${endColor}\n"
+
+  # Obtener imágenes del proyecto
+  mapfile -t IMAGES < <(docker compose config --images 2>/dev/null)
+
+  if [ ${#IMAGES[@]} -eq 0 ]; then
+    echo -e "${redColor}❌ No se encontraron imágenes en el proyecto.${endColor}"
+    read -rp "🔙 Presiona ENTER para continuar..." dummy
+    return 1
+  fi
+
+  echo -e "${turquoiseColor}Imágenes encontradas en el proyecto:${endColor}\n"
+  for i in "${!IMAGES[@]}"; do
+    echo -e "  ${blueColor}$((i+1))${endColor}) ${IMAGES[$i]}"
+  done
+
+  echo -e "\n${greenColor}Opciones de escaneo:${endColor}\n"
+  echo -e "${blueColor}0${endColor}) Escanear TODAS las imágenes"
+  for i in "${!IMAGES[@]}"; do
+    echo -e "${blueColor}$((i+1))${endColor}) Escanear solo: ${IMAGES[$i]}"
+  done
+  echo ""
+
+  read -rp "${yellowColor}👉 Selecciona una opción: ${endColor}" SCAN_CHOICE
+
+  # Determinar imágenes a escanear
+  local IMAGES_TO_SCAN=()
+  if [ "$SCAN_CHOICE" = "0" ]; then
+    IMAGES_TO_SCAN=("${IMAGES[@]}")
+  elif [[ "$SCAN_CHOICE" =~ ^[0-9]+$ ]] && [ "$SCAN_CHOICE" -ge 1 ] && [ "$SCAN_CHOICE" -le ${#IMAGES[@]} ]; then
+    IMAGES_TO_SCAN=("${IMAGES[$((SCAN_CHOICE-1))]}")
+  else
+    echo -e "${redColor}❌ Opción inválida.${endColor}"
+    read -rp "🔙 Presiona ENTER para continuar..." dummy
+    return 1
+  fi
+
+  # Preguntar tipo de escaneo
+  echo -e "\n${greenColor}Tipo de reporte:${endColor}\n"
+  echo -e "${blueColor}1${endColor}) Resumen (solo conteo de vulnerabilidades)"
+  echo -e "${blueColor}2${endColor}) Detallado (tabla completa de CVEs con paginación)"
+  echo -e "${blueColor}3${endColor}) Solo CRITICAL y HIGH (vulnerabilidades graves)"
+  echo ""
+  read -rp "${yellowColor}👉 Selecciona tipo [1]: ${endColor}" REPORT_TYPE
+  REPORT_TYPE="${REPORT_TYPE:-1}"
+
+  # Preparar variables para resultados
+  local TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+  local PROJECT_NAME=$(basename "$PWD")
+  local TOTAL_CRITICAL=0
+  local TOTAL_HIGH=0
+  local TOTAL_MEDIUM=0
+  local TOTAL_LOW=0
+  local TOTAL_UNKNOWN=0
+  local SCAN_RESULTS=""
+  local EXPORT_CONTENT=""
+
+  echo -e "\n${yellowColor}🔍 Iniciando escaneo de seguridad...${endColor}\n"
+
+  for IMAGE in "${IMAGES_TO_SCAN[@]}"; do
+    echo -e "${blueColor}┌──────────────────────────────────────────────────────────────────────────────┐${endColor}"
+    echo -e "${blueColor}│${endColor} ${turquoiseColor}📦 Escaneando: ${IMAGE}${endColor}"
+    echo -e "${blueColor}├──────────────────────────────────────────────────────────────────────────────┤${endColor}"
+
+    # Ejecutar trivy y capturar salida JSON para procesamiento
+    local TRIVY_OUTPUT
+    TRIVY_OUTPUT=$(trivy image --quiet --format json "$IMAGE" 2>/dev/null)
+
+    if [ $? -ne 0 ] || [ -z "$TRIVY_OUTPUT" ]; then
+      echo -e "${blueColor}│${endColor}  ${redColor}❌ Error al escanear imagen o imagen no encontrada${endColor}"
+      echo -e "${blueColor}└──────────────────────────────────────────────────────────────────────────────┘${endColor}\n"
+      EXPORT_CONTENT+="=== $IMAGE ===\nError al escanear\n\n"
+      continue
+    fi
+
+    # Extraer conteos de vulnerabilidades usando jq o grep/awk si jq no está disponible
+    local CRITICAL=0 HIGH=0 MEDIUM=0 LOW=0 UNKNOWN=0
+
+    if command -v jq &>/dev/null; then
+      CRITICAL=$(echo "$TRIVY_OUTPUT" | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' 2>/dev/null || echo 0)
+      HIGH=$(echo "$TRIVY_OUTPUT" | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' 2>/dev/null || echo 0)
+      MEDIUM=$(echo "$TRIVY_OUTPUT" | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' 2>/dev/null || echo 0)
+      LOW=$(echo "$TRIVY_OUTPUT" | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW")] | length' 2>/dev/null || echo 0)
+      UNKNOWN=$(echo "$TRIVY_OUTPUT" | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="UNKNOWN")] | length' 2>/dev/null || echo 0)
+    else
+      # Fallback sin jq - usar trivy con formato table
+      local TABLE_OUTPUT
+      TABLE_OUTPUT=$(trivy image --quiet --severity CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN "$IMAGE" 2>/dev/null)
+      CRITICAL=$(echo "$TABLE_OUTPUT" | grep -c "CRITICAL" || echo 0)
+      HIGH=$(echo "$TABLE_OUTPUT" | grep -c "HIGH" || echo 0)
+      MEDIUM=$(echo "$TABLE_OUTPUT" | grep -c "MEDIUM" || echo 0)
+      LOW=$(echo "$TABLE_OUTPUT" | grep -c "LOW" || echo 0)
+      UNKNOWN=$(echo "$TABLE_OUTPUT" | grep -c "UNKNOWN" || echo 0)
+    fi
+
+    # Asegurar valores numéricos
+    CRITICAL=${CRITICAL:-0}
+    HIGH=${HIGH:-0}
+    MEDIUM=${MEDIUM:-0}
+    LOW=${LOW:-0}
+    UNKNOWN=${UNKNOWN:-0}
+
+    # Acumular totales
+    TOTAL_CRITICAL=$((TOTAL_CRITICAL + CRITICAL))
+    TOTAL_HIGH=$((TOTAL_HIGH + HIGH))
+    TOTAL_MEDIUM=$((TOTAL_MEDIUM + MEDIUM))
+    TOTAL_LOW=$((TOTAL_LOW + LOW))
+    TOTAL_UNKNOWN=$((TOTAL_UNKNOWN + UNKNOWN))
+
+    # Mostrar resultados
+    local TOTAL_VULNS=$((CRITICAL + HIGH + MEDIUM + LOW + UNKNOWN))
+
+    if [ "$TOTAL_VULNS" -eq 0 ]; then
+      echo -e "${blueColor}│${endColor}  ${greenColor}✅ No se encontraron vulnerabilidades${endColor}"
+    else
+      echo -e "${blueColor}│${endColor}  ${yellowColor}⚠ Vulnerabilidades encontradas: ${TOTAL_VULNS}${endColor}"
+      echo -e "${blueColor}│${endColor}"
+      [ "$CRITICAL" -gt 0 ] && echo -e "${blueColor}│${endColor}    ${redColor}■${endColor} CRITICAL: ${redColor}$CRITICAL${endColor}"
+      [ "$HIGH" -gt 0 ] && echo -e "${blueColor}│${endColor}    ${redColor}■${endColor} HIGH:     ${redColor}$HIGH${endColor}"
+      [ "$MEDIUM" -gt 0 ] && echo -e "${blueColor}│${endColor}    ${yellowColor}■${endColor} MEDIUM:   ${yellowColor}$MEDIUM${endColor}"
+      [ "$LOW" -gt 0 ] && echo -e "${blueColor}│${endColor}    ${greenColor}■${endColor} LOW:      ${greenColor}$LOW${endColor}"
+      [ "$UNKNOWN" -gt 0 ] && echo -e "${blueColor}│${endColor}    ${purpleColor}■${endColor} UNKNOWN:  ${purpleColor}$UNKNOWN${endColor}"
+    fi
+
+    echo -e "${blueColor}└──────────────────────────────────────────────────────────────────────────────┘${endColor}\n"
+
+    # Preparar contenido para exportación
+    EXPORT_CONTENT+="================================================================================\n"
+    EXPORT_CONTENT+="IMAGEN: $IMAGE\n"
+    EXPORT_CONTENT+="================================================================================\n"
+    EXPORT_CONTENT+="Total vulnerabilidades: $TOTAL_VULNS\n"
+    EXPORT_CONTENT+="  CRITICAL: $CRITICAL\n"
+    EXPORT_CONTENT+="  HIGH:     $HIGH\n"
+    EXPORT_CONTENT+="  MEDIUM:   $MEDIUM\n"
+    EXPORT_CONTENT+="  LOW:      $LOW\n"
+    EXPORT_CONTENT+="  UNKNOWN:  $UNKNOWN\n\n"
+
+    # Si es reporte detallado o solo críticos, mostrar tabla de CVEs
+    if [ "$REPORT_TYPE" = "2" ] || [ "$REPORT_TYPE" = "3" ]; then
+      local SEVERITY_FILTER="CRITICAL,HIGH,MEDIUM,LOW"
+      local SEVERITY_LABEL="todas las severidades"
+
+      if [ "$REPORT_TYPE" = "3" ]; then
+        SEVERITY_FILTER="CRITICAL,HIGH"
+        SEVERITY_LABEL="CRITICAL y HIGH"
+      fi
+
+      echo -e "${yellowColor}  📋 Detalle de vulnerabilidades (${SEVERITY_LABEL}):${endColor}"
+      echo -e "${turquoiseColor}  Presiona 'q' para salir del visor${endColor}\n"
+      sleep 1
+
+      # Mostrar tabla completa de CVEs con paginación
+      trivy image --quiet --severity "$SEVERITY_FILTER" "$IMAGE" 2>/dev/null | less -R
+
+      EXPORT_CONTENT+="DETALLE DE CVEs:\n"
+      EXPORT_CONTENT+="$(trivy image --quiet --severity "$SEVERITY_FILTER" "$IMAGE" 2>/dev/null)\n\n"
+    fi
+  done
+
+  # Mostrar resumen general
+  local GRAND_TOTAL=$((TOTAL_CRITICAL + TOTAL_HIGH + TOTAL_MEDIUM + TOTAL_LOW + TOTAL_UNKNOWN))
+
+  echo -e "${purpleColor}╔══════════════════════════════════════════════════════════════════════════════╗${endColor}"
+  echo -e "${purpleColor}║${endColor}                         ${greenColor}📊 RESUMEN GENERAL${endColor}                                  ${purpleColor}║${endColor}"
+  echo -e "${purpleColor}╠══════════════════════════════════════════════════════════════════════════════╣${endColor}"
+  echo -e "${purpleColor}║${endColor}  Imágenes escaneadas:    ${turquoiseColor}${#IMAGES_TO_SCAN[@]}${endColor}"
+  echo -e "${purpleColor}║${endColor}  Total vulnerabilidades: ${turquoiseColor}$GRAND_TOTAL${endColor}"
+  echo -e "${purpleColor}║${endColor}"
+  echo -e "${purpleColor}║${endColor}    ${redColor}■${endColor} CRITICAL: ${redColor}$TOTAL_CRITICAL${endColor}"
+  echo -e "${purpleColor}║${endColor}    ${redColor}■${endColor} HIGH:     ${redColor}$TOTAL_HIGH${endColor}"
+  echo -e "${purpleColor}║${endColor}    ${yellowColor}■${endColor} MEDIUM:   ${yellowColor}$TOTAL_MEDIUM${endColor}"
+  echo -e "${purpleColor}║${endColor}    ${greenColor}■${endColor} LOW:      ${greenColor}$TOTAL_LOW${endColor}"
+  echo -e "${purpleColor}║${endColor}    ${purpleColor}■${endColor} UNKNOWN:  ${purpleColor}$TOTAL_UNKNOWN${endColor}"
+  echo -e "${purpleColor}║${endColor}"
+
+  # Indicador de estado de seguridad
+  if [ "$TOTAL_CRITICAL" -gt 0 ] || [ "$TOTAL_HIGH" -gt 0 ]; then
+    echo -e "${purpleColor}║${endColor}  ${redColor}⚠ ESTADO: CRÍTICO - Se requiere atención inmediata${endColor}"
+  elif [ "$TOTAL_MEDIUM" -gt 0 ]; then
+    echo -e "${purpleColor}║${endColor}  ${yellowColor}⚠ ESTADO: ADVERTENCIA - Revisar vulnerabilidades medias${endColor}"
+  elif [ "$GRAND_TOTAL" -eq 0 ]; then
+    echo -e "${purpleColor}║${endColor}  ${greenColor}✅ ESTADO: SEGURO - No se encontraron vulnerabilidades${endColor}"
+  else
+    echo -e "${purpleColor}║${endColor}  ${greenColor}✅ ESTADO: ACEPTABLE - Solo vulnerabilidades menores${endColor}"
+  fi
+
+  echo -e "${purpleColor}╚══════════════════════════════════════════════════════════════════════════════╝${endColor}\n"
+
+  # Agregar resumen al contenido de exportación
+  EXPORT_CONTENT+="\n================================================================================\n"
+  EXPORT_CONTENT+="RESUMEN GENERAL\n"
+  EXPORT_CONTENT+="================================================================================\n"
+  EXPORT_CONTENT+="Fecha: $(date '+%Y-%m-%d %H:%M:%S')\n"
+  EXPORT_CONTENT+="Proyecto: $PROJECT_NAME\n"
+  EXPORT_CONTENT+="Imágenes escaneadas: ${#IMAGES_TO_SCAN[@]}\n"
+  EXPORT_CONTENT+="Total vulnerabilidades: $GRAND_TOTAL\n"
+  EXPORT_CONTENT+="  CRITICAL: $TOTAL_CRITICAL\n"
+  EXPORT_CONTENT+="  HIGH:     $TOTAL_HIGH\n"
+  EXPORT_CONTENT+="  MEDIUM:   $TOTAL_MEDIUM\n"
+  EXPORT_CONTENT+="  LOW:      $TOTAL_LOW\n"
+  EXPORT_CONTENT+="  UNKNOWN:  $TOTAL_UNKNOWN\n"
+
+  # Preguntar si desea exportar
+  echo -e "${greenColor}¿Deseas exportar el reporte?${endColor}\n"
+  echo -e "${blueColor}1${endColor}) Exportar a archivo .txt"
+  echo -e "${blueColor}2${endColor}) Exportar a archivo JSON (trivy nativo)"
+  echo -e "${blueColor}n${endColor}) No exportar"
+  echo ""
+  read -rp "${yellowColor}👉 Selecciona opción [n]: ${endColor}" EXPORT_CHOICE
+
+  case "$EXPORT_CHOICE" in
+    1)
+      local EXPORT_FILE="${PROJECT_NAME}_security_scan_${TIMESTAMP}.txt"
+      echo -e "$EXPORT_CONTENT" > "$EXPORT_FILE"
+      echo -e "\n${greenColor}✅ Reporte exportado:${endColor}"
+      echo -e "   ${turquoiseColor}Archivo:${endColor} ${blueColor}$EXPORT_FILE${endColor}"
+      echo -e "   ${turquoiseColor}Ruta:${endColor} ${purpleColor}$(pwd)/$EXPORT_FILE${endColor}"
+      ;;
+    2)
+      local JSON_FILE="${PROJECT_NAME}_security_scan_${TIMESTAMP}.json"
+      echo "[" > "$JSON_FILE"
+      local FIRST=true
+      for IMAGE in "${IMAGES_TO_SCAN[@]}"; do
+        if [ "$FIRST" = true ]; then
+          FIRST=false
+        else
+          echo "," >> "$JSON_FILE"
+        fi
+        trivy image --quiet --format json "$IMAGE" 2>/dev/null >> "$JSON_FILE"
+      done
+      echo "]" >> "$JSON_FILE"
+      echo -e "\n${greenColor}✅ Reporte JSON exportado:${endColor}"
+      echo -e "   ${turquoiseColor}Archivo:${endColor} ${blueColor}$JSON_FILE${endColor}"
+      echo -e "   ${turquoiseColor}Ruta:${endColor} ${purpleColor}$(pwd)/$JSON_FILE${endColor}"
+      ;;
+    *)
+      echo -e "\n${yellowColor}Reporte no exportado.${endColor}"
+      ;;
+  esac
+
+  read -rp "\n🔙 Presiona ENTER para continuar..." dummy
+}
+
 # =============================
 # FUNCIONES DE MONITOREO DE RECURSOS
 # =============================
@@ -966,9 +1335,11 @@ project_menu() {
   echo -e "${blueColor}11${endColor}) Build + Start servicio ${purpleColor}(docker compose up -d --build <servicio>)${endColor}"
   echo -e "${blueColor}12${endColor}) Down servicio ${purpleColor}(docker compose down <servicio>)${endColor}"
   echo -e "${blueColor}13${endColor}) Ver logs ${purpleColor}(últimas 100 líneas)${endColor}"
-  echo -e "${blueColor}14${endColor}) Ver puertos ${purpleColor}(visualización con URLs)${endColor}"
-  echo -e "${blueColor}15${endColor}) Métricas ${purpleColor}(docker compose stats)${endColor}"
-  echo -e "${blueColor}16${endColor}) Ver docker-compose.yml"
+  echo -e "${blueColor}14${endColor}) Exportar logs ${purpleColor}(guardar en archivo .log)${endColor}"
+  echo -e "${blueColor}15${endColor}) Ver puertos ${purpleColor}(visualización con URLs)${endColor}"
+  echo -e "${blueColor}16${endColor}) Métricas ${purpleColor}(docker compose stats)${endColor}"
+  echo -e "${blueColor}17${endColor}) Ver docker-compose.yml"
+  echo -e "${blueColor}18${endColor}) Escanear imagenes ${purpleColor}(trivy - vulnerabilidades)${endColor}"
 
   echo -e "\n${blueColor}m${endColor}) Multi-Project ${purpleColor}(gestionar múltiples proyectos)${endColor}"
   echo -e "${blueColor}c${endColor}) Cambiar de proyecto"
@@ -1145,16 +1516,22 @@ project_menu() {
       quick_tail_logs
       ;;
     14)
+      export_logs
+      ;;
+    15)
       show_port_mappings
       read -rp "🔙 Presiona ENTER para continuar..." dummy
       ;;
-    15)
+    16)
       show_resource_metrics
       read -rp "🔙 Presiona ENTER para continuar..." dummy
       ;;
-    16)
+    17)
       echo -e "\n🛠️ Inspeccionando docker-compose.yml en $DIR:\n"
       less docker-compose.yml
+      ;;
+    18)
+      scan_images_trivy
       ;;
     m)
       MULTI_PROJECT_MODE=true
