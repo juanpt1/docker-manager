@@ -64,9 +64,11 @@ Una vez seleccionado un modo, el script mostrará el menú correspondiente con t
 | 11 | Build + Start servicio | `docker compose up -d --build <servicio>` |
 | 12 | Down servicio | `docker compose down <servicio>` |
 | 13 | Ver logs | Últimas 100 líneas de logs |
-| 14 | Ver puertos | Mapeo de puertos |
-| 15 | Métricas | `docker compose stats` con visualización avanzada |
-| 16 | Ver docker-compose.yml | Inspeccionar archivo yml |
+| 14 | Exportar logs | Guardar logs en archivo .log con timestamp |
+| 15 | Ver puertos | Mapeo de puertos |
+| 16 | Métricas | `docker compose stats` con visualización avanzada |
+| 17 | Ver docker-compose.yml | Inspeccionar archivo yml |
+| 18 | Escanear seguridad | Trivy - análisis de vulnerabilidades |
 | m | Multi-Project | Gestionar múltiples proyectos |
 | c | Cambiar proyecto | Volver al menú principal |
 | e | Salir | Cerrar el script |
@@ -102,12 +104,13 @@ Una vez seleccionado un modo, el script mostrará el menú correspondiente con t
 - Entrar a contenedor: Opción `10` → seleccionar servicio
 
 **Diagnóstico y troubleshooting:**
-- Ver puertos expuestos: Opción `14`
-- Ver métricas de recursos: Opción `15`
+- Ver puertos expuestos: Opción `15`
+- Ver métricas de recursos: Opción `16`
 - Revisar logs: Opción `13`
+- Exportar logs para análisis: Opción `14` → seleccionar servicio o todos
 
 **Monitoreo DevOps:**
-- Métricas de recursos (CPU/RAM/Red/I/O): Opción `15`
+- Métricas de recursos (CPU/RAM/Red/I/O): Opción `16`
   - Barras de progreso visuales con colores
   - Umbrales de alerta (verde/amarillo/rojo)
   - Detección automática de servicios críticos
@@ -158,7 +161,86 @@ Después de eso cierra y vuelve a abrir tu sesión para que el cambio surta efec
 
 ## Capacidades para DevOps
 
-### Monitoreo de Recursos (Opción 15)
+### Exportación de Logs (Opción 14)
+
+Exporta logs de servicios a archivos `.log` con timestamp para análisis posterior o respaldo:
+
+```
+✅ Logs exportados correctamente
+   Archivo: mi-proyecto_web_20240115_143245.log
+   Tamaño: 1.2M
+   Líneas: 15432
+   Ruta: /home/user/proyectos/mi-proyecto/mi-proyecto_web_20240115_143245.log
+```
+
+**Características:**
+- **Formato de nombre**: `{proyecto}_{servicio}_{timestamp}.log`
+- **Timestamp**: Formato `YYYYMMDD_HHMMSS` para ordenamiento cronológico
+- **Información post-exportación**: Muestra archivo, tamaño, líneas y ruta completa
+- **Selección flexible**: Exportar todos los servicios o uno específico
+- **Sin colores**: Usa `--no-color` para logs limpios
+
+**Usos prácticos:**
+- Respaldar logs antes de reiniciar contenedores
+- Compartir logs con el equipo para debugging
+- Análisis offline de errores
+- Auditoría
+
+### Escaneo de Seguridad con Trivy (Opción 18)
+
+Análisis de vulnerabilidades en imágenes Docker usando Trivy:
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    🔒 ESCÁNER DE SEGURIDAD TRIVY                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 📦 Escaneando: nginx:latest                                                   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  ⚠ Vulnerabilidades encontradas: 45                                          │
+│    ■ CRITICAL: 2                                                              │
+│    ■ HIGH:     8                                                              │
+│    ■ MEDIUM:   20                                                             │
+│    ■ LOW:      15                                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         📊 RESUMEN GENERAL                                    ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Imágenes escaneadas:    3                                                    ║
+║  Total vulnerabilidades: 127                                                  ║
+║  ⚠ ESTADO: CRÍTICO - Se requiere atención inmediata                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Características:**
+- **Detección automática de Trivy**: Muestra instrucciones de instalación si no está instalado
+- **Escaneo selectivo**: Todas las imágenes o una específica
+- **Tres tipos de reporte**:
+  - Resumen: Solo conteo de vulnerabilidades por severidad
+  - Detallado: Tabla completa de CVEs con paginación (Library, CVE-ID, Severity, Fixed Version, Title)
+  - Solo Críticos: Filtra solo CRITICAL y HIGH para atención inmediata
+- **Información de CVE completa**: ID, severidad, versión instalada, versión corregida, descripción
+- **Clasificación por severidad**: CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN
+- **Estado de seguridad**: Indicador visual del estado general
+- **Exportación**: Formato TXT legible o JSON nativo de Trivy
+
+**Opciones de exportación:**
+- **TXT**: Reporte legible con resumen y detalles
+- **JSON**: Formato nativo de Trivy para integración con CI/CD
+
+**Usos prácticos:**
+- Auditoría de seguridad antes de despliegues
+- Identificar imágenes que necesitan actualización
+- Cumplimiento de políticas de seguridad
+- Integración en pipelines de CI/CD
+
+**Requisitos:**
+- Trivy instalado (`trivy --version` para verificar)
+- Opcional: `jq` para mejor parsing de resultados
+
+### Monitoreo de Recursos (Opción 16)
 
 Visualización avanzada de métricas con colores, umbrales de alerta y modo tiempo real:
 
